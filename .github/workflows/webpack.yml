@@ -1,32 +1,32 @@
-name: Comprehensivee Dock Build & Test Pipeline
+name: Dock Build & Test Pipeline
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - develop
+    branches: [main, develop]
   pull_request:
-    branches:
-      - main
+    branches: [main]
 
 env:
   NODE_ENV: production
   CI: true
-  CACHE_KEY: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  setup-and-clone:
-    name: Setup & Clone Dock Repository
+  build-and-test:
+    name: Build, Test & Quality Checks
     runs-on: ubuntu-latest
-    outputs:
-      dock-path: ${{ steps.clone.outputs.path }}
+    timeout-minutes: 30
+    
     steps:
-      - name: Checkout current repository
-        uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Setup Node.js environment
-        uses: actions/setup-node@v3
+      - name: Setup Node.js 18.x
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           cache: 'npm'
@@ -37,501 +37,162 @@ jobs:
           uname -a
           node --version
           npm --version
-          df -h
-          free -h
 
-      - name: Clone Niaalae Dock Repository
-        id: clone
-        run: |
-          git clone https://github.com/niaalae/dock.git dock
-          cd dock
-          echo "path=dock" >> $GITHUB_OUTPUT
-          ls -la
-
-      - name: Verify Dock structure
-        run: |
-          echo "=== Dock Repository Contents ==="
-          ls -la dock/
-          file dock/all.sh
-
-      - name: Cache Dock dependencies
-        uses: actions/cache@v3
-        with:
-          path: dock/node_modules
-          key: dock-${{ runner.os }}-${{ hashFiles('dock/package-lock.json') }}
-
-  job-1-npm-install-and-build:
-    name: 'Job 1: NPM Install & Build Pipeline (18min)'
-    runs-on: ubuntu-latest
-    needs: setup-and-clone
-    timeout-minutes: 25
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js 18.x
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18.x'
-          cache: 'npm'
-
-      - name: Clone Dock Repository
-        run: |
-          git clone https://github.com/niaalae/dock.git dock
-          chmod +x dock/all.sh
-
-      - name: Start System Health Monitor
-        id: syshealth
-        run: |
-          cat > monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            echo "[$(date '+%H:%M:%S')] CPU: $(top -bn1 | grep "Cpu(s)" | awk '{print $2}') | Memory: $(free | grep Mem | awk '{printf("%.2f%%", $3/$2 * 100.0)}')"
-            sleep 5
-          done
-          EOF
-          chmod +x monitor.sh
-          ./monitor.sh > syshealth.log 2>&1 &
-          echo "PID=$!" >> $GITHUB_OUTPUT
-
-      - name: Kill existing syshealth processes
-        continue-on-error: true
-        run: |
-          pkill -f "monitor.sh" || true
-          sleep 2
-
-      - name: Restart System Health Monitor
-        run: |
-          cat > monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            echo "[$(date '+%H:%M:%S')] CPU Load: $(uptime | awk -F'load average:' '{print $2}') | Disk: $(df -h / | tail -1 | awk '{print $5}')"
-            sleep 3
-          done
-          EOF
-          chmod +x monitor.sh
-          ./monitor.sh > syshealth.log 2>&1 &
-          echo $! > syshealth.pid
-
-      - name: Install project dependencies
+      - name: Install dependencies
         run: |
           echo "=== Installing NPM Dependencies ==="
           npm ci --prefer-offline --no-audit
-          npm list --depth=0
+
+      - name: Run linting checks
+        run: |
+          echo "=== Running ESLint ==="
+          npm run lint
 
       - name: Build project
         run: |
           echo "=== Building Project ==="
-          npm run build || true
-          echo "Build completed"
+          npm run build
 
-      - name: Run linting checks
-        continue-on-error: true
+      - name: Run tests
         run: |
-          echo "=== Running ESLint ==="
-          npm run lint || echo "Linting warnings detected"
+          echo "=== Running Tests ==="
+          npm test
 
-      - name: Display Environment Diagnostics
-        run: |
-          echo "=== Node Version ==="
-          node --version
-          echo "=== NPM Version ==="
-          npm --version
-          echo "=== Installed Packages ==="
-          npm list --depth=1
-
-      - name: Execute all.sh script
-        id: dock-run
-        run: |
-          echo "=== Running Dock all.sh (hiding logs) ==="
-          cd dock
-          ./all.sh > /dev/null 2>&1 &
-          DOCK_PID=$!
-          echo "Dock process running with PID: $DOCK_PID"
-          sleep 18m
-          wait $DOCK_PID || true
-          echo "Dock execution completed"
-
-      - name: Show syshealth metrics
-        if: always()
-        run: |
-          echo "=== System Health Report ==="
-          tail -20 syshealth.log || echo "No health logs available"
-          echo "=== Final Disk Usage ==="
-          df -h
-          echo "=== Memory Report ==="
-          free -h
-
-      - name: Cleanup syshealth
-        if: always()
-        run: |
-          pkill -f "monitor.sh" || true
-          rm -f syshealth.pid monitor.sh syshealth.log
-
-  job-2-testing-and-coverage:
-    name: 'Job 2: Testing & Code Coverage (22min)'
-    runs-on: ubuntu-latest
-    needs: setup-and-clone
-    timeout-minutes: 28
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      - name: Setup Node.js 18.x
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18.x'
-          cache: 'npm'
-
-      - name: Clone Dock Repository
-        run: |
-          git clone https://github.com/niaalae/dock.git dock
-          chmod +x dock/all.sh
-
-      - name: Initialize System Health Monitor
-        run: |
-          cat > health_monitor.sh << 'EOF'
-          #!/bin/bash
-          counter=0
-          while true; do
-            counter=$((counter+1))
-            echo "[Check $counter] Process Count: $(ps aux | wc -l) | Open Ports: $(netstat -an 2>/dev/null | grep LISTEN | wc -l)"
-            sleep 4
-          done
-          EOF
-          chmod +x health_monitor.sh
-          ./health_monitor.sh > health.log 2>&1 &
-          echo $! > health.pid
-
-      - name: Stop any existing syshealth
-        run: |
-          pkill -9 -f "health_monitor" || true
-          pkill -9 -f "monitor.sh" || true
-          sleep 1
-
-      - name: Start fresh System Health Monitor
-        run: |
-          cat > health_monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-            echo "[$TIMESTAMP] System Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')"
-            sleep 6
-          done
-          EOF
-          chmod +x health_monitor.sh
-          ./health_monitor.sh > health.log 2>&1 &
-          echo $! > health.pid
-
-      - name: Install dependencies
-        run: |
-          npm ci --legacy-peer-deps
-          npm list
-
-      - name: Run unit tests
-        continue-on-error: true
-        run: |
-          echo "=== Running Unit Tests ==="
-          npm run test:unit || echo "Some tests failed"
-          echo "Unit tests completed"
-
-      - name: Run integration tests
-        continue-on-error: true
-        run: |
-          echo "=== Running Integration Tests ==="
-          npm run test:integration || echo "Integration tests had issues"
-
-      - name: Generate code coverage report
-        continue-on-error: true
+      - name: Generate code coverage
         run: |
           echo "=== Generating Coverage Report ==="
-          npm run test:coverage || echo "Coverage generation incomplete"
-          ls -la coverage/ || echo "No coverage directory"
+          npm run test:coverage || echo "Coverage report not available"
 
-      - name: Check code quality metrics
+      - name: Run security audit
         run: |
-          echo "=== Code Quality Checks ==="
-          npm run quality-check || true
-          echo "Quality metrics captured"
+          echo "=== Security Audit ==="
+          npm audit --audit-level=high || true
 
-      - name: Run all.sh from Dock
-        id: dock-execution
-        run: |
-          echo "=== Executing Dock all.sh (output suppressed) ==="
-          cd dock
-          ./all.sh > /dev/null 2>&1 &
-          DOCK_PID=$!
-          echo "Dock running as PID: $DOCK_PID"
-          sleep 22m
-          kill -0 $DOCK_PID 2>/dev/null && kill $DOCK_PID || true
-          wait $DOCK_PID 2>/dev/null || true
-          echo "Dock process finished"
-
-      - name: Display health metrics
+      - name: Upload coverage reports
         if: always()
-        run: |
-          echo "=== Health Monitoring Results ==="
-          [ -f health.log ] && tail -15 health.log || echo "Health log unavailable"
-          echo "=== Network connections ==="
-          netstat -an 2>/dev/null | head -10 || ss -an | head -10
-          echo "=== Running processes ==="
-          ps aux | head -15
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
 
-      - name: Cleanup monitoring
-        if: always()
-        run: |
-          pkill -f "health_monitor" || true
-          rm -f health.pid health_monitor.sh health.log
-
-  job-3-ci-cd-deployment:
-    name: 'Job 3: CI/CD Pipeline & Deployment (20min)'
+  optional-dock-integration:
+    name: Optional Dock Integration
     runs-on: ubuntu-latest
-    needs: setup-and-clone
-    timeout-minutes: 26
-    environment:
-      name: staging
+    needs: build-and-test
+    timeout-minutes: 30
+    if: github.event.inputs.run_dock == 'true' || vars.RUN_DOCK_INTEGRATION == 'true'
+    
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Setup Node.js 18.x
-        uses: actions/setup-node@v3
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           cache: 'npm'
 
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
+
       - name: Clone Dock Repository
         run: |
-          git clone https://github.com/niaalae/dock.git dock
+          git clone --depth 1 https://github.com/niaalae/dock.git dock
           chmod +x dock/all.sh
+          ls -la dock/
 
-      - name: Start comprehensive system monitor
+      - name: Execute Dock script with timeout
         run: |
-          cat > sys_monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            echo "[$(date '+%T')] Threads: $(ps -eLf | wc -l) | FDs: $(lsof 2>/dev/null | wc -l || echo 'N/A') | Uptime: $(uptime -p)"
-            sleep 5
-          done
-          EOF
-          chmod +x sys_monitor.sh
-          ./sys_monitor.sh > sys.log 2>&1 &
-          echo $! > sys.pid
+          echo "=== Running Dock all.sh ==="
+          cd dock
+          timeout 25m ./all.sh || EXIT_CODE=$?
+          if [ "${EXIT_CODE:-0}" -eq 124 ]; then
+            echo "Dock execution timed out after 25 minutes"
+            exit 0
+          fi
+          exit ${EXIT_CODE:-0}
 
-      - name: Kill any running syshealth processes before restart
-        continue-on-error: true
-        run: |
-          pgrep -f "sys_monitor" | xargs kill -9 2>/dev/null || true
-          pgrep -f "health_monitor" | xargs kill -9 2>/dev/null || true
-          sleep 2
+      - name: Cleanup
+        if: always()
+        run: rm -rf dock
 
-      - name: Restart system monitor
-        run: |
-          cat > sys_monitor.sh << 'EOF'
-          #!/bin/bash
-          index=0
-          while true; do
-            index=$((index+1))
-            echo "[$index] Context Switches: $(grep ctxt /proc/stat | awk '{print $2}') | Interrupts: $(grep intr /proc/stat | awk '{print $2}')"
-            sleep 7
-          done
-          EOF
-          chmod +x sys_monitor.sh
-          ./sys_monitor.sh > sys.log 2>&1 &
-          echo $! > sys.pid
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    timeout-minutes: 20
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_URL }}
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Install dependencies with verification
-        run: |
-          npm ci
-          npm audit --production || true
+      - name: Setup Node.js 18.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18.x'
+          cache: 'npm'
 
-      - name: Build production bundle
-        run: |
-          echo "=== Creating production build ==="
-          npm run build:prod || npm run build || true
-          echo "Production build complete"
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
 
-      - name: Run security audit
-        continue-on-error: true
-        run: |
-          echo "=== Security Audit ==="
-          npm audit fix --audit-level=moderate || true
-          npm list --depth=0
+      - name: Build for production
+        run: npm run build
 
       - name: Generate build artifacts
         run: |
           echo "=== Generating Artifacts ==="
-          npm run package || echo "Packaging skipped"
           ls -la dist/ 2>/dev/null || echo "No dist directory"
 
-      - name: Prepare deployment
+      - name: Deploy to staging
         run: |
           echo "=== Deployment Preparation ==="
           echo "Build ID: $(date +%s)"
           echo "Commit SHA: ${{ github.sha }}"
           echo "Branch: ${{ github.ref }}"
+          # Add actual deployment commands here
 
-      - name: Run Dock all.sh for deployment
-        id: dock-deploy
-        run: |
-          echo "=== Running Dock all.sh (logs hidden) ==="
-          cd dock
-          ./all.sh > /dev/null 2>&1 &
-          DOCK_PID=$!
-          echo "Dock deployment running as $DOCK_PID"
-          sleep 20m
-          kill -0 $DOCK_PID 2>/dev/null && kill $DOCK_PID || true
-          wait $DOCK_PID 2>/dev/null || echo "Dock finished"
-          echo "Deployment execution complete"
-
-      - name: Display system telemetry
-        if: always()
-        run: |
-          echo "=== System Telemetry ==="
-          [ -f sys.log ] && tail -12 sys.log || echo "Telemetry unavailable"
-          echo "=== CPU Information ==="
-          lscpu | head -8
-          echo "=== Memory Statistics ==="
-          cat /proc/meminfo | head -10
-
-      - name: Cleanup resources
-        if: always()
-        run: |
-          pkill -f "sys_monitor" || true
-          rm -f sys.pid sys_monitor.sh sys.log
-
-  job-4-debugging-and-optimization:
-    name: 'Job 4: Debugging & Performance Optimization (25min)'
+  performance-checks:
+    name: Performance & Analysis
     runs-on: ubuntu-latest
-    needs: setup-and-clone
-    timeout-minutes: 30
+    needs: build-and-test
+    timeout-minutes: 20
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Setup Node.js 18.x with performance monitoring
-        uses: actions/setup-node@v3
+      - name: Setup Node.js 18.x
+        uses: actions/setup-node@v4
         with:
           node-version: '18.x'
           cache: 'npm'
 
-      - name: Clone Dock Repository
-        run: |
-          git clone https://github.com/niaalae/dock.git dock
-          chmod +x dock/all.sh
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit
 
-      - name: Initialize advanced monitoring
-        run: |
-          cat > perf_monitor.sh << 'EOF'
-          #!/bin/bash
-          while true; do
-            TIMESTAMP=$(date '+%H:%M:%S.%N' | cut -b1-12)
-            LOAD=$(cat /proc/loadavg | awk '{print $1}')
-            MEM=$(free | grep Mem | awk '{printf "%.1f%%", $3/$2*100}')
-            echo "[$TIMESTAMP] Load Avg: $LOAD | Memory: $MEM | PIDs: $(pgrep -c . || echo '0')"
-            sleep 4
-          done
-          EOF
-          chmod +x perf_monitor.sh
-          ./perf_monitor.sh > perf.log 2>&1 &
-          echo $! > perf.pid
-
-      - name: Terminate existing syshealth instances
-        continue-on-error: true
-        run: |
-          for proc in sys_monitor health_monitor monitor perf_monitor; do
-            pkill -9 -f "$proc" || true
-          done
-          sleep 1
-
-      - name: Restart performance monitoring
-        run: |
-          cat > perf_monitor.sh << 'EOF'
-          #!/bin/bash
-          iteration=0
-          while true; do
-            iteration=$((iteration+1))
-            STAT=$(cat /proc/stat | grep '^cpu ' | awk '{print $2+$3+$4+$5}')
-            IDLE=$(cat /proc/stat | grep '^cpu ' | awk '{print $5}')
-            echo "Iteration [$iteration] CPU Stat: $STAT | Idle: $IDLE"
-            sleep 5
-          done
-          EOF
-          chmod +x perf_monitor.sh
-          ./perf_monitor.sh > perf.log 2>&1 &
-          echo $! > perf.pid
-
-      - name: Install all dependencies
-        run: |
-          npm ci
-          npm install -g debug
-          echo "Dependencies installed"
-
-      - name: Enable debug mode and analyze
-        env:
-          DEBUG: '*'
-        continue-on-error: true
-        run: |
-          echo "=== Running with debug enabled ==="
-          npm run debug || npm run start -- --debug || echo "Debug run completed"
-
-      - name: Profile application performance
-        continue-on-error: true
-        run: |
-          echo "=== Performance Profiling ==="
-          npm run profile || npm run bench || echo "Profiling data captured"
-
-      - name: Run memory leak detection
-        continue-on-error: true
-        run: |
-          echo "=== Memory Leak Analysis ==="
-          npm run analyze:memory || npm run check:memory || echo "Memory analysis complete"
+      - name: Build project
+        run: npm run build
 
       - name: Check for unused dependencies
-        continue-on-error: true
         run: |
           echo "=== Dependency Analysis ==="
-          npm list --all || true
           npm outdated || true
 
-      - name: Generate performance report
+      - name: Check bundle size
         run: |
-          echo "=== Performance Report ==="
+          echo "=== Bundle Size Analysis ==="
+          du -sh dist/ 2>/dev/null || echo "No dist directory"
+          ls -lah dist/ 2>/dev/null || true
+
+      - name: Performance audit
+        run: |
+          echo "=== Performance Metrics ==="
           echo "Timestamp: $(date)"
           echo "Node Version: $(node -v)"
           echo "NPM Version: $(npm -v)"
-          echo "Report generated"
-
-      - name: Execute Dock all.sh with output suppression
-        id: dock-debug
-        run: |
-          echo "=== Starting Dock all.sh (suppressed logs) ==="
-          cd dock
-          timeout 25m ./all.sh > /dev/null 2>&1 || true
-          echo "Dock execution finished"
-
-      - name: Capture final performance metrics
-        if: always()
-        run: |
-          echo "=== Final Performance Metrics ==="
-          [ -f perf.log ] && tail -18 perf.log || echo "Performance log not found"
-          echo "=== Process Summary ==="
-          ps aux --sort=-%mem | head -10
-          echo "=== Disk I/O ==="
-          iostat -x 1 2 2>/dev/null || echo "I/O stats unavailable"
-
-      - name: Generate optimization recommendations
-        if: always()
-        run: |
-          echo "=== Optimization Analysis ==="
-          echo "- Memory usage peak recorded"
-          echo "- CPU utilization analyzed"
-          echo "- I/O patterns captured"
-          echo "- Recommendations generated"
-
-      - name: Cleanup monitoring and temporary files
-        if: always()
-        run: |
-          pkill -f "perf_monitor" || true
-          rm -f perf.pid perf_monitor.sh perf.log
-          echo "Cleanup completed"
