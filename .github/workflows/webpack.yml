@@ -41,7 +41,11 @@ jobs:
       - name: Install dependencies
         run: |
           echo "=== Installing NPM Dependencies ==="
-          npm ci --prefer-offline --no-audit
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit
+          else
+            npm install --no-audit
+          fi
 
       - name: Run linting checks
         run: |
@@ -94,7 +98,12 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit
+          else
+            npm install --no-audit
+          fi
 
       - name: Clone Dock Repository
         run: |
@@ -138,7 +147,12 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit
+          else
+            npm install --no-audit
+          fi
 
       - name: Build for production
         run: npm run build
@@ -174,7 +188,12 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm ci --prefer-offline --no-audit
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --prefer-offline --no-audit
+          else
+            npm install --no-audit
+          fi
 
       - name: Build project
         run: npm run build
